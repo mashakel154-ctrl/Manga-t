@@ -311,14 +311,18 @@ class MainActivity : Activity() {
     private fun geminiTranslate(texts: List<String>, lang: Lang, key: String): List<String>? {
         val items = JSONArray()
         texts.forEach { items.put(it) }
-        val prompt = "You are a professional manga and webtoon translator. " +
+               val prompt = "You are a professional manga and webtoon translator. " +
             "Translate the following speech bubble texts from the language with code '${lang.google}' into Arabic. " +
-            "They come from one page, in reading order, so use the context of the whole page. " +
-            "Use natural Modern Standard Arabic dialogue that fits each character's tone. " +
-            "Make each translation compact and close in length to the original, because it must fit inside a small speech bubble. " +
+            "They come from one page, in reading order, so use the context of the whole page to understand who is speaking about what. " +
+            "Translate FAITHFULLY and COMPLETELY: every idea, detail, name, number, question and emotion in the original must appear in the Arabic. " +
+            "NEVER shorten, summarize, paraphrase loosely, or omit anything, even if the Arabic becomes longer than the original. " +
+            "The main point and topic of each line must be clear and easy to understand, and the flow between consecutive bubbles must stay logical. " +
+            "If a line is a fragment that continues in the next bubble, translate it so that the two read naturally together. " +
+            "Use clear, natural Arabic dialogue that fits each character's tone (simple wording, not stiff or literal word-for-word). " +
+            "Do not worry about the length or the bubble size. " +
             "Transliterate character names consistently. Keep punctuation like ... ! ? when it carries tone. " +
             "Return ONLY a JSON array of exactly ${texts.size} strings, in the same order as the input. " +
-            "Input: " + items.toString()
+            "Input: " + items.toString() 
         val body = JSONObject()
             .put(
                 "contents",
