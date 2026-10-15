@@ -61,12 +61,23 @@
     if (i) delete i.dataset.mtId;
   }
 
+  function growBox(d) {
+    var w = d.offsetWidth, h = d.offsetHeight;
+    var nw = w * 1.08, nh = h * 1.12;
+    d.style.left = (parseFloat(d.style.left) - (nw - w) / 2) + 'px';
+    d.style.top = (parseFloat(d.style.top) - (nh - h) / 2) + 'px';
+    d.style.width = nw + 'px';
+    d.style.height = nh + 'px';
+  }
+
   function fitBox(d) {
-    var fs = Math.min(40, Math.max(10, d.clientHeight * 0.5));
+    var fs = Math.min(42, Math.max(12, d.clientHeight * 0.45));
     d.style.fontSize = fs + 'px';
-    while (fs > 8 && (d.scrollHeight > d.clientHeight + 1 || d.scrollWidth > d.clientWidth + 1)) {
-      fs -= 1;
-      d.style.fontSize = fs + 'px';
+    var guard = 0;
+    while ((d.scrollHeight > d.clientHeight + 1 || d.scrollWidth > d.clientWidth + 1) && guard < 80) {
+      if (fs > 12) { fs -= 1; d.style.fontSize = fs + 'px'; }
+      else { growBox(d); }
+      guard++;
     }
   }
 
@@ -75,21 +86,25 @@
     if (!img) return;
     var entry = { img: img, w: res.w, els: [] };
     var r = img.getBoundingClientRect();
-    var k = img.clientWidth / res.w, pad = 6;
+    var k = img.clientWidth / res.w;
     res.boxes.forEach(function (b) {
+      var w0 = b.x1 - b.x0, h0 = b.y1 - b.y0;
+      var px = Math.max(10, w0 * 0.12), py = Math.max(10, h0 * 0.14);
+      var x0 = Math.max(0, b.x0 - px), y0 = Math.max(0, b.y0 - py);
+      var x1 = Math.min(res.w, b.x1 + px), y1 = b.y1 + py;
       var d = document.createElement('div');
       d.contentEditable = 'true';
       d.textContent = b.text;
-      d.dataset.b = [b.x0, b.y0, b.x1, b.y1].join(',');
+      d.dataset.b = [x0, y0, x1, y1].join(',');
       d.style.cssText =
         'position:absolute;z-index:2147483000;display:' + (visible ? 'flex' : 'none') +
         ';align-items:center;justify-content:center;text-align:center;background:#fff;color:#111;' +
-        'border-radius:42%;overflow:hidden;font-weight:700;line-height:1.25;word-break:break-word;' +
-        'padding:2px;box-sizing:border-box;direction:rtl;font-family:Tahoma,"Noto Naskh Arabic",Arial,sans-serif;' +
-        'left:' + (r.left + window.scrollX + b.x0 * k - pad) + 'px;' +
-        'top:' + (r.top + window.scrollY + b.y0 * k - pad) + 'px;' +
-        'width:' + ((b.x1 - b.x0) * k + pad * 2) + 'px;' +
-        'height:' + ((b.y1 - b.y0) * k + pad * 2) + 'px';
+        'border-radius:35%;overflow:hidden;font-weight:700;line-height:1.3;word-break:break-word;' +
+        'padding:4px;box-sizing:border-box;direction:rtl;font-family:Tahoma,"Noto Sans Arabic",Arial,sans-serif;' +
+        'left:' + (r.left + window.scrollX + x0 * k) + 'px;' +
+        'top:' + (r.top + window.scrollY + y0 * k) + 'px;' +
+        'width:' + ((x1 - x0) * k) + 'px;' +
+        'height:' + ((y1 - y0) * k) + 'px';
       document.body.appendChild(d);
       fitBox(d);
       entry.els.push(d);
@@ -99,13 +114,13 @@
 
   function reposition() {
     entries.forEach(function (e) {
-      var r = e.img.getBoundingClientRect(), k = e.img.clientWidth / e.w, pad = 6;
+      var r = e.img.getBoundingClientRect(), k = e.img.clientWidth / e.w;
       e.els.forEach(function (d) {
         var b = d.dataset.b.split(',').map(Number);
-        d.style.left = (r.left + window.scrollX + b[0] * k - pad) + 'px';
-        d.style.top = (r.top + window.scrollY + b[1] * k - pad) + 'px';
-        d.style.width = ((b[2] - b[0]) * k + pad * 2) + 'px';
-        d.style.height = ((b[3] - b[1]) * k + pad * 2) + 'px';
+        d.style.left = (r.left + window.scrollX + b[0] * k) + 'px';
+        d.style.top = (r.top + window.scrollY + b[1] * k) + 'px';
+        d.style.width = ((b[2] - b[0]) * k) + 'px';
+        d.style.height = ((b[3] - b[1]) * k) + 'px';
         fitBox(d);
       });
     });
