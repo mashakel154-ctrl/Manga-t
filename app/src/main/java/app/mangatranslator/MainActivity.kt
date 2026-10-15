@@ -2,10 +2,13 @@ package app.mangatranslator
 
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Rect
 import android.net.Uri
 import android.os.Bundle
+import android.text.InputType
 import android.util.Base64
 import android.view.Gravity
 import android.view.ViewGroup
@@ -64,17 +67,24 @@ class MainActivity : Activity() {
         }
     )
 
+    private val geminiModels = listOf("gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite")
+
     private lateinit var web: WebView
     private lateinit var urlBox: EditText
+    private lateinit var keyBox: EditText
     private lateinit var langSpinner: Spinner
     private lateinit var statusView: TextView
     private val pool = Executors.newSingleThreadExecutor()
+    private val prefs by lazy { getSharedPreferences("mt", Context.MODE_PRIVATE) }
     private val translatorJs: String by lazy {
         assets.open("translator.js").bufferedReader().use { it.readText() }
     }
 
     @Volatile
     private var running = false
+
+    @Volatile
+    private var aiError = ""
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
@@ -129,6 +139,31 @@ class MainActivity : Activity() {
             addView(clearBtn)
         }
 
+        keyBox = EditText(this).apply {
+            hint = "مفتاح Gemini المجاني (اختياري)"
+            setSingleLine(true)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            textDirection = android.view.View.TEXT_DIRECTION_LTR
+            setText(prefs.getString("gemini", "") ?: "")
+        }
+        val saveKeyBtn = Button(this).apply {
+            text = "حفظ"
+            setOnClickListener {
+                val k = keyBox.text.toString().trim()
+                prefs.edit().putString("gemini", k).apply()
+                setStatus(
+                    if (k.isEmpty()) "تم حذف المفتاح، سيُستخدم المترجم العادي."
+                    else "تم حفظ المفتاح. ستُترجم الصفحات بواسطة Gemini."
+                )
+            }
+        }
+        val row3 = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(keyBox, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(saveKeyBtn)
+        }
+
         statusView = TextView(this).apply {
             text = "الصق رابط الموقع، افتحه، ثم اضغط ترجم."
             textSize = 13f
@@ -152,6 +187,7 @@ class MainActivity : Activity() {
 
         root.addView(row1)
         root.addView(row2)
+        root.addView(row3)
         root.addView(statusView)
         root.addView(web, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         setContentView(root)
@@ -178,6 +214,7 @@ class MainActivity : Activity() {
         val lang = langs[langSpinner.selectedItemPosition]
         val ua = web.settings.userAgentString
         val referer = web.url ?: ""
+        val apiKey = (prefs.getString("gemini", "") ?: "").trim()
         web.evaluateJavascript(translatorJs, null)
         web.evaluateJavascript("window.MT ? MT.collect() : '[]'") { raw ->
             val json = try {
@@ -194,7 +231,7 @@ class MainActivity : Activity() {
                 return@evaluateJavascript
             }
             running = true
-            pool.execute { process(arr, lang, ua, referer) }
+            pool.execute { process(arr, lang, ua, referer, apiKey) }
         }
     }
 
@@ -236,7 +273,78 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun process(arr: JSONArray, lang: Lang, ua: String, referer: String) {
+    private fun geminiTranslate(texts: List<String>, lang: Lang, key: String): List<String>? {
+        val items = JSONArray()
+        texts.forEach { items.put(it) }
+        val prompt = "You are a professional manga and webtoon translator. " +
+            "Translate the following speech bubble texts from the language with code '${lang.google}' into Arabic. " +
+            "They come from one page, in reading order, so use the context of the whole page. " +
+            "Use natural Modern Standard Arabic dialogue that fits each character's tone. " +
+            "Keep each translation short enough to fit a speech bubble. " +
+            "Transliterate character names consistently. Keep punctuation like ... ! ? when it carries tone. " +
+            "Return ONLY a JSON array of exactly ${texts.size} strings, in the same order as the input. " +
+            "Input: " + items.toString()
+        val body = JSONObject()
+            .put(
+                "contents",
+                JSONArray().put(
+                    JSONObject().put("parts", JSONArray().put(JSONObject().put("text", prompt)))
+                )
+            )
+            .put(
+                "generationConfig",
+                JSONObject()
+                    .put("temperature", 0.3)
+                    .put("responseMimeType", "application/json")
+                    .put(
+                        "responseSchema",
+                        JSONObject().put("type", "ARRAY").put("items", JSONObject().put("type", "STRING"))
+                    )
+            )
+        val bytes = body.toString().toByteArray(Charsets.UTF_8)
+        for (model in geminiModels) {
+            try {
+                val c = URL("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent")
+                    .openConnection() as HttpURLConnection
+                c.requestMethod = "POST"
+                c.doOutput = true
+                c.connectTimeout = 10000
+                c.readTimeout = 45000
+                c.setRequestProperty("Content-Type", "application/json")
+                c.setRequestProperty("x-goog-api-key", key)
+                c.outputStream.use { it.write(bytes) }
+                if (c.responseCode != 200) {
+                    aiError = "رمز ${c.responseCode}"
+                    continue
+                }
+                val resp = JSONObject(c.inputStream.bufferedReader().use { it.readText() })
+                val parts = resp.getJSONArray("candidates").getJSONObject(0)
+                    .getJSONObject("content").getJSONArray("parts")
+                val sb = StringBuilder()
+                for (i in 0 until parts.length()) {
+                    val p = parts.getJSONObject(i)
+                    if (!p.optBoolean("thought", false)) sb.append(p.optString("text", ""))
+                }
+                val out = JSONArray(sb.toString().trim())
+                if (out.length() != texts.size) {
+                    aiError = "رد غير مكتمل"
+                    continue
+                }
+                val list = ArrayList<String>()
+                for (i in 0 until out.length()) list.add(out.getString(i).trim())
+                if (list.any { it.isEmpty() }) {
+                    aiError = "رد فارغ"
+                    continue
+                }
+                return list
+            } catch (e: Exception) {
+                aiError = "فشل الاتصال"
+            }
+        }
+        return null
+    }
+
+    private fun process(arr: JSONArray, lang: Lang, ua: String, referer: String, apiKey: String) {
         val recognizer = lang.make()
         val translator = Translation.getClient(
             TranslatorOptions.Builder()
@@ -248,7 +356,9 @@ class MainActivity : Activity() {
         var emptyCount = 0
         var failCount = 0
         var skipped = 0
+        var usedAi = 0
         var modelState = 0
+        aiError = ""
 
         fun offlineTranslate(src: String): String? {
             if (modelState == 2) return null
@@ -274,16 +384,35 @@ class MainActivity : Activity() {
                     val bmp = download(o.getString("url"), ua, referer)
                         ?: throw IllegalStateException("download")
                     val text = Tasks.await(recognizer.process(InputImage.fromBitmap(bmp, 0)))
-                    val boxes = JSONArray()
+
+                    val srcs = ArrayList<String>()
+                    val rects = ArrayList<Rect>()
                     for (block in text.textBlocks) {
                         val rect = block.boundingBox ?: continue
-                        val src = cleanText(block.text, lang.noSpace)
-                        if (src.none { it.isLetterOrDigit() }) continue
-                        val tr = onlineTranslate(src, lang.google, "ar") ?: offlineTranslate(src)
+                        val s = cleanText(block.text, lang.noSpace)
+                        if (s.none { it.isLetterOrDigit() }) continue
+                        srcs.add(s)
+                        rects.add(rect)
+                    }
+
+                    val ai = if (srcs.isNotEmpty() && apiKey.isNotEmpty()) {
+                        setStatus("الصورة ${i + 1} من ${arr.length()}: ترجمة Gemini...")
+                        geminiTranslate(srcs, lang, apiKey)
+                    } else {
+                        null
+                    }
+                    if (ai != null) usedAi++
+                    val trs: List<String?> = ai
+                        ?: srcs.map { onlineTranslate(it, lang.google, "ar") ?: offlineTranslate(it) }
+
+                    val boxes = JSONArray()
+                    for (k in srcs.indices) {
+                        val tr = trs[k]
                         if (tr == null) {
                             skipped++
                             continue
                         }
+                        val rect = rects[k]
                         boxes.put(
                             JSONObject()
                                 .put("x0", rect.left).put("y0", rect.top)
@@ -304,6 +433,14 @@ class MainActivity : Activity() {
                 }
             }
             var msg = "انتهت الترجمة: نجحت $okCount، بدون نص $emptyCount، فشلت $failCount."
+            if (apiKey.isNotEmpty()) {
+                if (usedAi > 0) {
+                    msg += " ترجم Gemini $usedAi صفحة."
+                } else {
+                    val err = if (aiError.isNotEmpty()) " ($aiError)" else ""
+                    msg += " تعذّر Gemini$err، استُخدم المترجم العادي."
+                }
+            }
             if (skipped > 0) msg += " تعذّرت ترجمة $skipped مقطع."
             setStatus("$msg اضغط ترجم مرة ثانية للصور التالية.")
         } catch (e: Exception) {
