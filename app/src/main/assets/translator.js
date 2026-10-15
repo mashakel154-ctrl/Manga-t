@@ -1,24 +1,64 @@
 (function () {
   if (window.MT) return;
   var seq = 0, visible = true, entries = [];
+  var BATCH = 5;
+
+  function usable(i) {
+    var u = i.currentSrc || i.src || '';
+    if (!/^(https?:|blob:|data:)/i.test(u)) return false;
+    if (!i.complete || i.naturalWidth < 300 || i.naturalHeight < 300) return false;
+    return i.getBoundingClientRect().width >= 200;
+  }
+
+  function dist(i) {
+    var r = i.getBoundingClientRect();
+    if (r.bottom < 0) return -r.bottom;
+    if (r.top > window.innerHeight) return r.top - window.innerHeight;
+    return 0;
+  }
 
   function collect() {
-    var list = [];
-    Array.prototype.forEach.call(document.images, function (i) {
-      var u = i.currentSrc || i.src;
-      if (!/^https?:/i.test(u)) return;
-      if (i.naturalWidth < 300 || i.naturalHeight < 300 || i.clientWidth < 200) return;
-      if (i.dataset.mtId) return;
-      list.push(i);
+    var list = Array.prototype.filter.call(document.images, function (i) {
+      return usable(i) && !i.dataset.mtId;
     });
     list.sort(function (a, b) {
-      return Math.abs(a.getBoundingClientRect().top) - Math.abs(b.getBoundingClientRect().top);
+      return dist(a) - dist(b) || a.getBoundingClientRect().top - b.getBoundingClientRect().top;
     });
-    return JSON.stringify(list.map(function (i) {
-      var id = String(++seq);
-      i.dataset.mtId = id;
-      return { id: id, url: i.currentSrc || i.src };
-    }));
+    list = list.slice(0, BATCH);
+    var out = [];
+    list.forEach(function (i) {
+      var id = String(++seq), u = i.currentSrc || i.src;
+      if (/^https?:/i.test(u)) {
+        i.dataset.mtId = id;
+        out.push({ id: id, url: u });
+        return;
+      }
+      try {
+        var s = Math.min(1, 2400 / i.naturalWidth);
+        var c = document.createElement('canvas');
+        c.width = Math.round(i.naturalWidth * s);
+        c.height = Math.round(i.naturalHeight * s);
+        c.getContext('2d').drawImage(i, 0, 0, c.width, c.height);
+        var d = c.toDataURL('image/jpeg', 0.85);
+        i.dataset.mtId = id;
+        out.push({ id: id, url: d });
+      } catch (e) {}
+    });
+    return JSON.stringify(out);
+  }
+
+  function info() {
+    var all = document.images.length, big = 0, done = 0;
+    Array.prototype.forEach.call(document.images, function (i) {
+      if (usable(i)) { big++; if (i.dataset.mtId) done++; }
+    });
+    return 'صور الصفحة: ' + all + '، الكبيرة: ' + big + '، سبقت معالجتها: ' + done +
+      '، لوحات canvas: ' + document.querySelectorAll('canvas').length + '.';
+  }
+
+  function unmark(id) {
+    var i = document.querySelector('img[data-mt-id="' + id + '"]');
+    if (i) delete i.dataset.mtId;
   }
 
   function fitBox(d) {
@@ -81,9 +121,11 @@
   function clear() {
     entries.forEach(function (e) {
       e.els.forEach(function (d) { d.remove(); });
-      delete e.img.dataset.mtId;
     });
     entries = [];
+    Array.prototype.forEach.call(document.querySelectorAll('img[data-mt-id]'), function (i) {
+      delete i.dataset.mtId;
+    });
   }
 
   var timer;
@@ -91,5 +133,5 @@
   window.addEventListener('resize', later);
   if (window.ResizeObserver) new ResizeObserver(later).observe(document.body);
 
-  window.MT = { collect: collect, place: place, toggle: toggle, clear: clear };
+  window.MT = { collect: collect, place: place, toggle: toggle, clear: clear, info: info, unmark: unmark };
 })();
