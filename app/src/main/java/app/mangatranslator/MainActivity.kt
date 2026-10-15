@@ -6,6 +6,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Bundle
+import android.util.Base64
 import android.view.Gravity
 import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
@@ -185,7 +186,10 @@ class MainActivity : Activity() {
             }
             val arr = try { JSONArray(json) } catch (e: Exception) { JSONArray() }
             if (arr.length() == 0) {
-                setStatus("لم أجد صورًا كبيرة جديدة في هذه الصفحة.")
+                web.evaluateJavascript("window.MT ? MT.info() : ''") { r ->
+                    val info = try { JSONTokener(r).nextValue() as? String ?: "" } catch (e: Exception) { "" }
+                    setStatus("لم أجد صورًا جديدة للترجمة. $info")
+                }
                 return@evaluateJavascript
             }
             running = true
@@ -201,15 +205,20 @@ class MainActivity : Activity() {
                 .setTargetLanguage(TranslateLanguage.ARABIC)
                 .build()
         )
+        var okCount = 0
+        var emptyCount = 0
+        var failCount = 0
         try {
             setStatus("تجهيز نموذج الترجمة (يُنزَّل مرة واحدة فقط)...")
             Tasks.await(translator.downloadModelIfNeeded(DownloadConditions.Builder().build()))
 
             for (i in 0 until arr.length()) {
                 val o = arr.getJSONObject(i)
+                val id = o.getString("id")
                 setStatus("الصورة ${i + 1} من ${arr.length()}...")
                 try {
-                    val bmp = download(o.getString("url"), ua, referer) ?: continue
+                    val bmp = download(o.getString("url"), ua, referer)
+                        ?: throw IllegalStateException("download")
                     val text = Tasks.await(recognizer.process(InputImage.fromBitmap(bmp, 0)))
                     val boxes = JSONArray()
                     for (block in text.textBlocks) {
@@ -225,16 +234,18 @@ class MainActivity : Activity() {
                         )
                     }
                     val res = JSONObject()
-                        .put("id", o.getString("id"))
+                        .put("id", id)
                         .put("w", bmp.width)
                         .put("boxes", boxes)
                     bmp.recycle()
+                    if (boxes.length() == 0) emptyCount++ else okCount++
                     runOnUiThread { web.evaluateJavascript("MT.place($res)", null) }
                 } catch (e: Exception) {
-                    // تجاهل الصورة المعطوبة وأكمل
+                    failCount++
+                    runOnUiThread { web.evaluateJavascript("MT.unmark('$id')", null) }
                 }
             }
-            setStatus("انتهت الترجمة. اضغط على أي نص في الصفحة لتعديله.")
+            setStatus("انتهت الترجمة: نجحت $okCount، بدون نص $emptyCount، فشلت $failCount. اضغط ترجم مرة ثانية للصور التالية.")
         } catch (e: Exception) {
             setStatus("تعذّر تنزيل نموذج الترجمة. تأكد من الاتصال بالإنترنت وأعد المحاولة.")
         } finally {
@@ -245,14 +256,19 @@ class MainActivity : Activity() {
     }
 
     private fun download(url: String, ua: String, referer: String): Bitmap? {
-        if (!url.startsWith("http")) return null
-        val c = URL(url).openConnection() as HttpURLConnection
-        c.connectTimeout = 15000
-        c.readTimeout = 30000
-        c.setRequestProperty("User-Agent", ua)
-        if (referer.isNotEmpty()) c.setRequestProperty("Referer", referer)
-        CookieManager.getInstance().getCookie(url)?.let { c.setRequestProperty("Cookie", it) }
-        val bytes = c.inputStream.use { it.readBytes() }
+        val bytes: ByteArray = if (url.startsWith("data:")) {
+            Base64.decode(url.substringAfter(","), Base64.DEFAULT)
+        } else if (url.startsWith("http")) {
+            val c = URL(url).openConnection() as HttpURLConnection
+            c.connectTimeout = 15000
+            c.readTimeout = 30000
+            c.setRequestProperty("User-Agent", ua)
+            if (referer.isNotEmpty()) c.setRequestProperty("Referer", referer)
+            CookieManager.getInstance().getCookie(url)?.let { c.setRequestProperty("Cookie", it) }
+            c.inputStream.use { it.readBytes() }
+        } else {
+            return null
+        }
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
         var sample = 1
