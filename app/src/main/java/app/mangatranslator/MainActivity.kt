@@ -44,21 +44,22 @@ class MainActivity : Activity() {
     private class Lang(
         val label: String,
         val code: String,
+        val google: String,
         val noSpace: Boolean,
         val make: () -> TextRecognizer
     )
 
     private val langs = listOf(
-        Lang("يابانية", TranslateLanguage.JAPANESE, true) {
+        Lang("يابانية", TranslateLanguage.JAPANESE, "ja", true) {
             TextRecognition.getClient(JapaneseTextRecognizerOptions.Builder().build())
         },
-        Lang("كورية", TranslateLanguage.KOREAN, false) {
+        Lang("كورية", TranslateLanguage.KOREAN, "ko", false) {
             TextRecognition.getClient(KoreanTextRecognizerOptions.Builder().build())
         },
-        Lang("صينية", TranslateLanguage.CHINESE, true) {
+        Lang("صينية", TranslateLanguage.CHINESE, "zh-CN", true) {
             TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build())
         },
-        Lang("إنجليزية", TranslateLanguage.ENGLISH, false) {
+        Lang("إنجليزية", TranslateLanguage.ENGLISH, "en", false) {
             TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
         }
     )
@@ -197,6 +198,44 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun cleanText(raw: String, noSpace: Boolean): String {
+        var t = raw.replace("-\n", "")
+            .replace("\n", if (noSpace) "" else " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+        if (noSpace) {
+            t = t.replace(" ", "")
+        } else {
+            val letters = t.filter { it.isLetter() }
+            if (letters.length >= 3 && letters.count { it.isUpperCase() } >= letters.length * 0.8) {
+                t = t.lowercase().replaceFirstChar { it.uppercase() }
+                t = t.replace(Regex("\\bi\\b"), "I")
+            }
+        }
+        return t
+    }
+
+    private fun onlineTranslate(text: String, from: String, to: String): String? {
+        return try {
+            val u = "https://translate.googleapis.com/translate_a/single?client=gtx&dt=t" +
+                "&sl=" + Uri.encode(from) + "&tl=" + Uri.encode(to) + "&q=" + Uri.encode(text)
+            val c = URL(u).openConnection() as HttpURLConnection
+            c.connectTimeout = 8000
+            c.readTimeout = 12000
+            c.setRequestProperty("User-Agent", "Mozilla/5.0")
+            if (c.responseCode != 200) return null
+            val body = c.inputStream.bufferedReader().use { it.readText() }
+            val parts = JSONArray(body).getJSONArray(0)
+            val sb = StringBuilder()
+            for (i in 0 until parts.length()) {
+                sb.append(parts.getJSONArray(i).optString(0, ""))
+            }
+            sb.toString().trim().ifEmpty { null }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     private fun process(arr: JSONArray, lang: Lang, ua: String, referer: String) {
         val recognizer = lang.make()
         val translator = Translation.getClient(
@@ -208,10 +247,25 @@ class MainActivity : Activity() {
         var okCount = 0
         var emptyCount = 0
         var failCount = 0
-        try {
-            setStatus("تجهيز نموذج الترجمة (يُنزَّل مرة واحدة فقط)...")
-            Tasks.await(translator.downloadModelIfNeeded(DownloadConditions.Builder().build()))
+        var skipped = 0
+        var modelState = 0
 
+        fun offlineTranslate(src: String): String? {
+            if (modelState == 2) return null
+            return try {
+                if (modelState == 0) {
+                    setStatus("تنزيل نموذج الترجمة بدون إنترنت...")
+                    Tasks.await(translator.downloadModelIfNeeded(DownloadConditions.Builder().build()))
+                    modelState = 1
+                }
+                Tasks.await(translator.translate(src))
+            } catch (e: Exception) {
+                modelState = 2
+                null
+            }
+        }
+
+        try {
             for (i in 0 until arr.length()) {
                 val o = arr.getJSONObject(i)
                 val id = o.getString("id")
@@ -223,9 +277,13 @@ class MainActivity : Activity() {
                     val boxes = JSONArray()
                     for (block in text.textBlocks) {
                         val rect = block.boundingBox ?: continue
-                        val src = block.text.replace("\n", if (lang.noSpace) "" else " ").trim()
-                        if (src.isEmpty()) continue
-                        val tr = Tasks.await(translator.translate(src))
+                        val src = cleanText(block.text, lang.noSpace)
+                        if (src.none { it.isLetterOrDigit() }) continue
+                        val tr = onlineTranslate(src, lang.google, "ar") ?: offlineTranslate(src)
+                        if (tr == null) {
+                            skipped++
+                            continue
+                        }
                         boxes.put(
                             JSONObject()
                                 .put("x0", rect.left).put("y0", rect.top)
@@ -245,9 +303,11 @@ class MainActivity : Activity() {
                     runOnUiThread { web.evaluateJavascript("MT.unmark('$id')", null) }
                 }
             }
-            setStatus("انتهت الترجمة: نجحت $okCount، بدون نص $emptyCount، فشلت $failCount. اضغط ترجم مرة ثانية للصور التالية.")
+            var msg = "انتهت الترجمة: نجحت $okCount، بدون نص $emptyCount، فشلت $failCount."
+            if (skipped > 0) msg += " تعذّرت ترجمة $skipped مقطع."
+            setStatus("$msg اضغط ترجم مرة ثانية للصور التالية.")
         } catch (e: Exception) {
-            setStatus("تعذّر تنزيل نموذج الترجمة. تأكد من الاتصال بالإنترنت وأعد المحاولة.")
+            setStatus("حدث خطأ أثناء الترجمة. أعد المحاولة.")
         } finally {
             recognizer.close()
             translator.close()
