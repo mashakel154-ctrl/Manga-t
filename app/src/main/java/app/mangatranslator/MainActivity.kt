@@ -8,6 +8,8 @@ import android.graphics.BitmapFactory
 import android.graphics.Rect
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.text.InputType
 import android.util.Base64
 import android.view.Gravity
@@ -19,6 +21,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.ArrayAdapter
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.Spinner
@@ -72,12 +75,21 @@ class MainActivity : Activity() {
     private lateinit var web: WebView
     private lateinit var urlBox: EditText
     private lateinit var keyBox: EditText
+    private lateinit var autoBox: CheckBox
     private lateinit var langSpinner: Spinner
     private lateinit var statusView: TextView
     private val pool = Executors.newSingleThreadExecutor()
+    private val handler = Handler(Looper.getMainLooper())
     private val prefs by lazy { getSharedPreferences("mt", Context.MODE_PRIVATE) }
     private val translatorJs: String by lazy {
         assets.open("translator.js").bufferedReader().use { it.readText() }
+    }
+
+    private val autoTick = object : Runnable {
+        override fun run() {
+            if (autoBox.isChecked && !running) autoCheck()
+            handler.postDelayed(this, 1500)
+        }
     }
 
     @Volatile
@@ -114,6 +126,12 @@ class MainActivity : Activity() {
             addView(goBtn)
         }
 
+        autoBox = CheckBox(this).apply {
+            text = "ترجمة تلقائية للصفحة التي تظهر"
+            isChecked = prefs.getBoolean("auto", true)
+            setOnCheckedChangeListener { _, c -> prefs.edit().putBoolean("auto", c).apply() }
+        }
+
         langSpinner = Spinner(this).apply {
             adapter = ArrayAdapter(
                 this@MainActivity,
@@ -121,14 +139,18 @@ class MainActivity : Activity() {
                 langs.map { it.label }
             )
         }
-        val translateBtn = Button(this).apply { text = "ترجم"; setOnClickListener { startTranslation() } }
+        val translateBtn = Button(this).apply { text = "ترجم"; setOnClickListener { startTranslation(false) } }
         val toggleBtn = Button(this).apply {
             text = "إخفاء/إظهار"
             setOnClickListener { web.evaluateJavascript("window.MT && MT.toggle()", null) }
         }
         val clearBtn = Button(this).apply {
             text = "مسح"
-            setOnClickListener { web.evaluateJavascript("window.MT && MT.clear()", null); setStatus("تم المسح.") }
+            setOnClickListener {
+                autoBox.isChecked = false
+                web.evaluateJavascript("window.MT && MT.clear()", null)
+                setStatus("تم المسح وإيقاف الترجمة التلقائية.")
+            }
         }
         val row2 = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -165,7 +187,7 @@ class MainActivity : Activity() {
         }
 
         statusView = TextView(this).apply {
-            text = "الصق رابط الموقع، افتحه، ثم اضغط ترجم."
+            text = "الصق رابط الموقع، افتح الفصل، وستُترجم الصفحة تلقائيًا."
             textSize = 13f
             setPadding(dp(4), dp(4), dp(4), dp(4))
         }
@@ -186,6 +208,7 @@ class MainActivity : Activity() {
         }
 
         root.addView(row1)
+        root.addView(autoBox)
         root.addView(row2)
         root.addView(row3)
         root.addView(statusView)
@@ -193,6 +216,7 @@ class MainActivity : Activity() {
         setContentView(root)
 
         web.loadUrl("https://www.google.com")
+        handler.postDelayed(autoTick, 3000)
     }
 
     private fun go() {
@@ -209,14 +233,22 @@ class MainActivity : Activity() {
         runOnUiThread { statusView.text = msg }
     }
 
-    private fun startTranslation() {
+    private fun autoCheck() {
+        web.evaluateJavascript("window.MT ? MT.pending(1.5) : 0") { r ->
+            val n = r?.trim()?.toIntOrNull() ?: 0
+            if (n > 0 && !running) startTranslation(true)
+        }
+    }
+
+    private fun startTranslation(auto: Boolean) {
         if (running) return
         val lang = langs[langSpinner.selectedItemPosition]
         val ua = web.settings.userAgentString
         val referer = web.url ?: ""
         val apiKey = (prefs.getString("gemini", "") ?: "").trim()
-        web.evaluateJavascript(translatorJs, null)
-        web.evaluateJavascript("window.MT ? MT.collect() : '[]'") { raw ->
+        if (!auto) web.evaluateJavascript(translatorJs, null)
+        val call = if (auto) "window.MT ? MT.collect(1.5, 3) : '[]'" else "window.MT ? MT.collect(0, 5) : '[]'"
+        web.evaluateJavascript(call) { raw ->
             val json = try {
                 JSONTokener(raw).nextValue() as? String ?: "[]"
             } catch (e: Exception) {
@@ -224,12 +256,15 @@ class MainActivity : Activity() {
             }
             val arr = try { JSONArray(json) } catch (e: Exception) { JSONArray() }
             if (arr.length() == 0) {
-                web.evaluateJavascript("window.MT ? MT.info() : ''") { r ->
-                    val info = try { JSONTokener(r).nextValue() as? String ?: "" } catch (e: Exception) { "" }
-                    setStatus("لم أجد صورًا جديدة للترجمة. $info")
+                if (!auto) {
+                    web.evaluateJavascript("window.MT ? MT.info() : ''") { r ->
+                        val info = try { JSONTokener(r).nextValue() as? String ?: "" } catch (e: Exception) { "" }
+                        setStatus("لم أجد صورًا جديدة للترجمة. $info")
+                    }
                 }
                 return@evaluateJavascript
             }
+            if (running) return@evaluateJavascript
             running = true
             pool.execute { process(arr, lang, ua, referer, apiKey) }
         }
@@ -280,7 +315,7 @@ class MainActivity : Activity() {
             "Translate the following speech bubble texts from the language with code '${lang.google}' into Arabic. " +
             "They come from one page, in reading order, so use the context of the whole page. " +
             "Use natural Modern Standard Arabic dialogue that fits each character's tone. " +
-            "Keep each translation short enough to fit a speech bubble. " +
+            "Make each translation compact and close in length to the original, because it must fit inside a small speech bubble. " +
             "Transliterate character names consistently. Keep punctuation like ... ! ? when it carries tone. " +
             "Return ONLY a JSON array of exactly ${texts.size} strings, in the same order as the input. " +
             "Input: " + items.toString()
@@ -432,7 +467,7 @@ class MainActivity : Activity() {
                     runOnUiThread { web.evaluateJavascript("MT.unmark('$id')", null) }
                 }
             }
-            var msg = "انتهت الترجمة: نجحت $okCount، بدون نص $emptyCount، فشلت $failCount."
+            var msg = "تمت الترجمة: نجحت $okCount، بدون نص $emptyCount، فشلت $failCount."
             if (apiKey.isNotEmpty()) {
                 if (usedAi > 0) {
                     msg += " ترجم Gemini $usedAi صفحة."
@@ -442,7 +477,7 @@ class MainActivity : Activity() {
                 }
             }
             if (skipped > 0) msg += " تعذّرت ترجمة $skipped مقطع."
-            setStatus("$msg اضغط ترجم مرة ثانية للصور التالية.")
+            setStatus(msg)
         } catch (e: Exception) {
             setStatus("حدث خطأ أثناء الترجمة. أعد المحاولة.")
         } finally {
@@ -480,6 +515,7 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        handler.removeCallbacks(autoTick)
         pool.shutdown()
         super.onDestroy()
     }
